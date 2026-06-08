@@ -1,0 +1,25 @@
+{
+  "name": "inference-traffic-management-agent",
+  "version": "1.0.0",
+  "description": "Autonomous agent that observes AI gateway telemetry, reasons about load, and rebalances traffic routing — Tetrate AI Buildathon",
+  "type": "module",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js",
+    "demo": "node agent.js",
+    "simulator": "cd simulator && (test -d .venv || python3 -m venv .venv) && .venv/bin/pip install -q -r requirements.txt && .venv/bin/python simulator.py"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "tetrate",
+    "tars",
+    "ai-gateway",
+    "traffic-management"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "openai": "^6.42.0"
+  }
+}
