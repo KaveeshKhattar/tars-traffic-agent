@@ -3,30 +3,34 @@
 
 Most AI gateways react to thresholds. This one reasons.
 
-When latency spikes, a rule fires, but a cold backend and an overloaded one look identical on a single metric. TARS reads multiple signals together, diagnoses *why* traffic is degrading, and reroutes with a plain-English explanation of every decision. It also remembers past incidents, so it gets faster at recognizing patterns it's seen before.
+When latency spikes, a rule fires — but a cold backend and an overloaded one look identical on a single metric. TARS reads multiple signals together, diagnoses *why* traffic is degrading, and reroutes with a plain-English explanation of every decision. It also remembers past incidents, so it gets faster at recognizing patterns it's seen before.
 
 ---
 
 ## Quick start
 
-**Terminal 1 — traffic simulator**
-
 ```bash
-cd simulator
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python simulator.py
-```
-
-**Terminal 2 — TARS agent**
-
-```bash
+git clone https://github.com/kaveeshkhattar/tars-traffic-agent
+cd tars-traffic-agent
 npm install
-export TARS_API_KEY=sk-your-key-here   # router.tetrate.ai → API Keys
-node agent.js
 ```
 
-Or: `npm run simulator` in one terminal, `npm start` in another.
+**Terminal 1 — live traffic simulator**
+```bash
+npm run simulator
+```
+
+**Terminal 2 — dashboard**
+```bash
+node dashboard/server.js
+# open http://localhost:3000
+```
+
+**Terminal 3 — agent**
+```bash
+export TARS_API_KEY=sk-your-key-here   # router.tetrate.ai → API Keys
+npm start
+```
 
 ---
 
@@ -34,55 +38,68 @@ Or: `npm run simulator` in one terminal, `npm start` in another.
 
 | Cycle | Scenario | What the agent does |
 |-------|----------|---------------------|
-| 1 | Healthy | Reads metrics → all clear → logs NO_ACTION |
-| 2 | Cold start | Latency high, errors low, queue empty → diagnoses cold start → warms backend → writes to memory |
-| 3 | Cold start (repeat) | Recognises pattern from memory → acts faster → references past incident |
-| 4 | True overload | Latency high, errors high, queue deep → correctly sheds load → explains why this is different from cycle 2 |
+| 1 | Healthy | Reads live metrics → all clear → logs NO_ACTION |
+| 2 | Cold start | Latency high, errors 0%, queue low → diagnoses cold start → warms backend → writes to memory |
+| 3 | Cold start (repeat) | Recognises pattern from memory → references prior incident → acts faster |
+| 4 | True overload | Latency high, errors 80%, queue deep → sheds load → explains why this is different from cycle 2 |
+
+The dashboard at `http://localhost:3000` shows routing weights updating live, metrics going red/amber/green, and the agent's reasoning streaming into the audit log in real time.
 
 ---
 
 ## Why not just a bash script?
 
-A threshold rule gives one answer to "latency is high." This agent reads three signals simultaneously:
+A threshold rule gives one answer to "latency is high." TARS reads three signals simultaneously:
 
-- **High latency + low errors + empty queue** → cold start → warm the backend
-- **High latency + high errors + deep queue** → overload → shed load
+| Signals | Diagnosis | Action |
+|---------|-----------|--------|
+| Latency↑, errors✓, queue✓ | Cold start | Warm the backend |
+| Latency↑, errors↑, queue↑ | Overload | Shed load to haiku |
+| All normal | Healthy | NO_ACTION |
 
-Same surface symptom. Different root cause. Different correct response. A script cannot make this distinction without a hand-written decision tree that someone has to maintain. The LLM reads the signal combination and reasons to the right answer.
+Same surface symptom. Different root cause. Different correct response. A script cannot make this distinction without a hand-written decision tree. The LLM reads the signal combination and reasons to the right answer — and explains it.
 
 ---
 
 ## Architecture
 
 ```
-simulator/     →   Python mock gateway + load generator + /metrics API (port 9090)
-tools.js       →   get_metrics (live fetch), patch_routing, audit_log, remember_incident
-memory.js      →   append-only MEMORY.md, read at start of every cycle
-agent.js       →   TARS loop: call model → run tools → feed back → repeat
-scenarios.js   →   legacy static snapshots (unused when simulator is running)
+simulator/simulator.py   →   async Python gateway, real queue/latency modelling
+                              exposes /metrics, /control/scenario, /control/routing
+                              on http://localhost:9090
+
+tools.js                 →   get_metrics (reads live simulator), patch_routing
+                              (syncs weights back to simulator), audit_log,
+                              remember_incident
+
+memory.js                →   append-only MEMORY.md, read at start of every cycle
+
+agent.js                 →   TARS loop: call model → run tools → feed back → repeat
+                              emits events to dashboard in real time
+
+dashboard/server.js      →   Express SSE server, receives events from agent
+dashboard/index.html     →   live UI: routing bars, metric cards, audit log stream
 ```
 
-Each demo cycle activates a traffic pattern on the simulator (`healthy`, `cold_start`, `overload`), waits ~8s for correlated metrics to accumulate, then the agent reads live p95 latency, error rate, and queue depth from real request samples — not hardcoded numbers.
+**Model strategy:** `claude-haiku-4-5` for every triage cycle (fast, cheap, 30s polling). `claude-sonnet-4-6` as fallback on 429/5xx. Both via TARS — one endpoint, one key, model is a single string swap.
 
-**Model strategy:** `claude-haiku-4-5` for every triage cycle (fast, cheap). `claude-sonnet-4-6` as fallback on 429/5xx. Both via TARS — one endpoint, one key, model is a single string swap.
-
-**Hardening:** MAX_TURNS = 8, fallback model, structured errors from every tool so the agent can recover without crashing.
+**Hardening:** MAX_TURNS = 8, fallback model, structured errors from every tool, dashboard emit is fire-and-forget (agent runs fine without it).
 
 ---
 
 ## Replacing simulated tools with real infrastructure
 
-The simulator already matches the production shape: `get_metrics()` reads a metrics endpoint, `patch_routing()` pushes weight changes back. To go live:
+Each tool in `tools.js` has a comment marking the drop-in point:
 
 ```js
-// get_metrics → fetch from Prometheus
+// get_metrics → real Prometheus
 GET /api/v1/query?query=histogram_quantile(0.95, rate(envoy_request_duration_ms_bucket[60s]))
 
-// patch_routing → k8s client PATCH on LLMRoutingRule CRD
+// patch_routing → real Kubernetes LLMRoutingRule
 kubectl patch llmroutingrule inference-router --type=merge --patch '{...}'
 ```
 
-The agent loop in `agent.js` is identical either way.
+The agent loop is identical either way.
 
 ---
 
@@ -90,14 +107,17 @@ The agent loop in `agent.js` is identical either way.
 
 ```
 tars-traffic-agent/
-├── agent.js       # main loop
-├── tools.js       # tool implementations + definitions
-├── scenarios.js   # legacy static snapshots
+├── agent.js                # main loop + dashboard emit
+├── tools.js                # tool implementations + schemas
+├── scenarios.js            # fallback static snapshots
+├── memory.js               # cross-run incident memory
+├── MEMORY.md               # starts empty, agent writes here
 ├── simulator/
-│   ├── simulator.py
+│   ├── simulator.py        # async Python mock gateway
 │   └── requirements.txt
-├── memory.js      # cross-run incident memory
-├── MEMORY.md      # starts empty, agent writes here
+├── dashboard/
+│   ├── server.js           # SSE event server
+│   └── index.html          # live dashboard UI
 ├── package.json
 └── README.md
 ```

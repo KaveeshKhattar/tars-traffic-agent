@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TARS — Inference Traffic Agent</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #090b0e;
+    --surface:   #0f1318;
+    --border:    #1e2530;
+    --haiku:     #00d4aa;
+    --sonnet:    #7c6af7;
+    --healthy:   #00d4aa;
+    --cold:      #f5a623;
+    --overload:  #f0455a;
+    --muted:     #4a5568;
+    --text:      #e2e8f0;
+    --subtext:   #8896a8;
+    --mono:      'Space Mono', monospace;
+    --sans:      'IBM Plex Sans', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Scanline overlay */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 999;
+  }
+
+  header {
+    padding: 24px 32px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    color: var(--haiku);
+    text-transform: uppercase;
+  }
+
+  .logo span { color: var(--subtext); font-weight: 400; }
+
+  .status-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    padding: 4px 12px;
+    border-radius: 2px;
+    border: 1px solid var(--border);
+    color: var(--subtext);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.3s;
+  }
+
+  .status-pill.active { border-color: var(--haiku); color: var(--haiku); }
+  .status-pill.active .dot { background: var(--haiku); }
+
+  .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.3s;
+  }
+
+  .dot.pulse { animation: pulse 1.2s ease-in-out infinite; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto 1fr;
+    gap: 1px;
+    background: var(--border);
+    height: calc(100vh - 65px);
+  }
+
+  .panel {
+    background: var(--bg);
+    padding: 24px;
+    overflow: hidden;
+  }
+
+  .panel-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 20px;
+  }
+
+  /* ── Metrics row ── */
+  .metrics-row {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+  }
+
+  .metric-cell {
+    background: var(--surface);
+    padding: 20px 24px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .metric-cell::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--border);
+    transition: background 0.4s;
+  }
+
+  .metric-cell.alert::after { background: var(--overload); }
+  .metric-cell.warn::after  { background: var(--cold); }
+  .metric-cell.ok::after    { background: var(--healthy); }
+
+  .metric-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .metric-value {
+    font-family: var(--mono);
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1;
+    transition: color 0.4s;
+    color: var(--text);
+  }
+
+  .metric-value.alert { color: var(--overload); }
+  .metric-value.warn  { color: var(--cold); }
+  .metric-value.ok    { color: var(--healthy); }
+
+  .metric-unit {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  /* ── Routing panel ── */
+  .routing-panel { grid-column: 1; }
+
+  .scenario-badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    padding: 4px 10px;
+    border-radius: 2px;
+    margin-bottom: 24px;
+    text-transform: uppercase;
+    transition: all 0.4s;
+  }
+
+  .scenario-badge.healthy  { background: rgba(0,212,170,0.1); color: var(--healthy); border: 1px solid rgba(0,212,170,0.3); }
+  .scenario-badge.cold_start { background: rgba(245,166,35,0.1); color: var(--cold); border: 1px solid rgba(245,166,35,0.3); }
+  .scenario-badge.overload { background: rgba(240,69,90,0.1); color: var(--overload); border: 1px solid rgba(240,69,90,0.3); }
+  .scenario-badge.waiting  { background: rgba(74,85,104,0.1); color: var(--muted); border: 1px solid var(--border); }
+
+  .backend-row {
+    margin-bottom: 20px;
+  }
+
+  .backend-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 8px;
+  }
+
+  .backend-name {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--subtext);
+  }
+
+  .backend-weight {
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 700;
+    transition: color 0.4s;
+  }
+
+  .haiku-weight  { color: var(--haiku); }
+  .sonnet-weight { color: var(--sonnet); }
+
+  .bar-track {
+    height: 6px;
+    background: var(--border);
+    border-radius: 1px;
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: 1px;
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .haiku-fill  { background: var(--haiku); }
+  .sonnet-fill { background: var(--sonnet); }
+
+  .routing-note {
+    margin-top: 28px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    font-size: 12px;
+    color: var(--subtext);
+    line-height: 1.6;
+    font-family: var(--mono);
+    min-height: 60px;
+    transition: border-color 0.4s;
+  }
+
+  .routing-note.patch { border-left-color: var(--haiku); color: var(--text); }
+
+  /* ── Cycle panel ── */
+  .cycle-panel { grid-column: 2; }
+
+  .cycle-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+
+  .cycle-card {
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    transition: all 0.4s;
+    position: relative;
+  }
+
+  .cycle-card.active {
+    border-color: var(--haiku);
+    background: rgba(0,212,170,0.04);
+  }
+
+  .cycle-card.done-healthy  { border-color: rgba(0,212,170,0.4); }
+  .cycle-card.done-cold     { border-color: rgba(245,166,35,0.4); }
+  .cycle-card.done-overload { border-color: rgba(240,69,90,0.4); }
+
+  .cycle-num {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    margin-bottom: 6px;
+    letter-spacing: 0.1em;
+  }
+
+  .cycle-scenario {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .cycle-action {
+    font-size: 10px;
+    color: var(--subtext);
+    margin-top: 4px;
+    line-height: 1.4;
+  }
+
+  .cycle-dot {
+    position: absolute;
+    top: 10px; right: 10px;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .cycle-dot.thinking { background: var(--haiku); animation: pulse 0.8s infinite; }
+  .cycle-dot.healthy  { background: var(--healthy); }
+  .cycle-dot.cold     { background: var(--cold); }
+  .cycle-dot.overload { background: var(--overload); }
+
+  /* ── Audit log ── */
+  .audit-panel {
+    grid-column: 1 / -1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .audit-panel::-webkit-scrollbar { width: 4px; }
+  .audit-panel::-webkit-scrollbar-track { background: transparent; }
+  .audit-panel::-webkit-scrollbar-thumb { background: var(--border); }
+
+  .audit-entries { display: flex; flex-direction: column; gap: 1px; }
+
+  .audit-entry {
+    padding: 14px 20px;
+    background: var(--surface);
+    display: grid;
+    grid-template-columns: 160px 1fr 2fr;
+    gap: 16px;
+    align-items: start;
+    opacity: 0;
+    transform: translateY(8px);
+    animation: slideIn 0.4s forwards;
+    border-left: 3px solid transparent;
+  }
+
+  .audit-entry.no-action { border-left-color: var(--muted); }
+  .audit-entry.patch     { border-left-color: var(--haiku); }
+  .audit-entry.overload  { border-left-color: var(--overload); }
+  .audit-entry.cold      { border-left-color: var(--cold); }
+
+  @keyframes slideIn {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .audit-time {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    padding-top: 2px;
+  }
+
+  .audit-action {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  .audit-action.no-action { color: var(--muted); }
+  .audit-action.patch     { color: var(--haiku); }
+  .audit-action.overload  { color: var(--overload); }
+
+  .audit-rationale {
+    font-size: 12px;
+    color: var(--subtext);
+    line-height: 1.6;
+  }
+
+  .memory-tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    padding: 2px 6px;
+    background: rgba(124,106,247,0.15);
+    color: var(--sonnet);
+    border: 1px solid rgba(124,106,247,0.3);
+    border-radius: 2px;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 40px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+  }
+
+  .blink { animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">TARS <span>/ Inference Traffic Agent</span></div>
+  <div class="status-pill" id="statusPill">
+    <div class="dot" id="statusDot"></div>
+    <span id="statusText">WAITING</span>
+  </div>
+</header>
+
+<main>
+  <!-- Metrics row -->
+  <div class="metrics-row">
+    <div class="metric-cell" id="cell-latency">
+      <div class="metric-label">P95 Latency</div>
+      <div class="metric-value" id="val-latency">—</div>
+      <div class="metric-unit">ms</div>
+    </div>
+    <div class="metric-cell" id="cell-errors">
+      <div class="metric-label">Error Rate</div>
+      <div class="metric-value" id="val-errors">—</div>
+      <div class="metric-unit">%</div>
+    </div>
+    <div class="metric-cell" id="cell-queue">
+      <div class="metric-label">Queue Depth</div>
+      <div class="metric-value" id="val-queue">—</div>
+      <div class="metric-unit">requests</div>
+    </div>
+    <div class="metric-cell" id="cell-tokens">
+      <div class="metric-label">Throughput</div>
+      <div class="metric-value" id="val-tokens">—</div>
+      <div class="metric-unit">tokens/sec</div>
+    </div>
+  </div>
+
+  <!-- Routing panel -->
+  <div class="panel routing-panel">
+    <div class="panel-label">Routing Weights</div>
+    <div class="scenario-badge waiting" id="scenarioBadge">Idle</div>
+
+    <div class="backend-row">
+      <div class="backend-header">
+        <span class="backend-name">claude-haiku-4-5</span>
+        <span class="backend-weight haiku-weight" id="haikuPct">70%</span>
+      </div>
+      <div class="bar-track">
+        <div class="bar-fill haiku-fill" id="haikuBar" style="width:70%"></div>
+      </div>
+    </div>
+
+    <div class="backend-row">
+      <div class="backend-header">
+        <span class="backend-name">claude-sonnet-4-6</span>
+        <span class="backend-weight sonnet-weight" id="sonnetPct">30%</span>
+      </div>
+      <div class="bar-track">
+        <div class="bar-fill sonnet-fill" id="sonnetBar" style="width:30%"></div>
+      </div>
+    </div>
+
+    <div class="routing-note" id="routingNote">Awaiting agent cycle...</div>
+  </div>
+
+  <!-- Cycle tracker -->
+  <div class="panel cycle-panel">
+    <div class="panel-label">Observation Cycles</div>
+    <div class="cycle-grid" id="cycleGrid">
+      <div class="cycle-card" id="cycle-1">
+        <div class="cycle-dot" id="dot-1"></div>
+        <div class="cycle-num">CYCLE 01</div>
+        <div class="cycle-scenario" style="color:var(--muted)">—</div>
+        <div class="cycle-action"></div>
+      </div>
+      <div class="cycle-card" id="cycle-2">
+        <div class="cycle-dot" id="dot-2"></div>
+        <div class="cycle-num">CYCLE 02</div>
+        <div class="cycle-scenario" style="color:var(--muted)">—</div>
+        <div class="cycle-action"></div>
+      </div>
+      <div class="cycle-card" id="cycle-3">
+        <div class="cycle-dot" id="dot-3"></div>
+        <div class="cycle-num">CYCLE 03</div>
+        <div class="cycle-scenario" style="color:var(--muted)">—</div>
+        <div class="cycle-action"></div>
+      </div>
+      <div class="cycle-card" id="cycle-4">
+        <div class="cycle-dot" id="dot-4"></div>
+        <div class="cycle-num">CYCLE 04</div>
+        <div class="cycle-scenario" style="color:var(--muted)">—</div>
+        <div class="cycle-action"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Audit log -->
+  <div class="panel audit-panel">
+    <div class="panel-label">Audit Log — Agent Reasoning</div>
+    <div class="audit-entries" id="auditEntries">
+      <div class="empty-state">Waiting for agent<span class="blink">_</span></div>
+    </div>
+  </div>
+</main>
+
+<script>
+  let currentCycle = 0;
+  const cycleScenarios = {};
+
+  const es = new EventSource('/stream');
+
+  es.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    handle(event);
+  };
+
+  function handle(ev) {
+    if (ev.type === 'reset') {
+      location.reload();
+      return;
+    }
+
+    if (ev.type === 'cycle_start') {
+      currentCycle = ev.cycle;
+      cycleScenarios[ev.cycle] = ev.scenario;
+      setStatus('CYCLE ' + ev.cycle, true);
+      updateScenarioBadge(ev.scenario);
+      markCycleActive(ev.cycle, ev.scenario);
+    }
+
+    if (ev.type === 'metrics') {
+      updateMetrics(ev.data);
+    }
+
+    if (ev.type === 'patch') {
+      updateRouting(ev.backends, ev.rationale);
+    }
+
+    if (ev.type === 'audit') {
+      addAuditEntry(ev);
+      markCycleDone(currentCycle, ev.action, cycleScenarios[currentCycle]);
+    }
+
+    if (ev.type === 'done') {
+      setStatus('COMPLETE', false);
+    }
+  }
+
+  function setStatus(text, active) {
+    const pill = document.getElementById('statusPill');
+    const dot  = document.getElementById('statusDot');
+    const txt  = document.getElementById('statusText');
+    txt.textContent = text;
+    pill.className = 'status-pill' + (active ? ' active' : '');
+    dot.className  = 'dot' + (active ? ' pulse' : '');
+  }
+
+  function updateScenarioBadge(scenario) {
+    const b = document.getElementById('scenarioBadge');
+    const labels = { healthy: 'Healthy', cold_start: 'Cold Start', overload: 'Overload' };
+    b.textContent = labels[scenario] || scenario;
+    b.className = 'scenario-badge ' + scenario;
+  }
+
+  function updateMetrics(data) {
+    const set = (id, val, unit='') => {
+      document.getElementById('val-' + id).textContent = val !== undefined ? val : '—';
+    };
+    set('latency', data.p95_latency_ms);
+    set('errors', data.error_rate_pct);
+    set('queue', data.queue_depth);
+    set('tokens', data.tokens_per_sec);
+
+    // Color coding
+    colorMetric('latency', data.p95_latency_ms, 2000, 1500);
+    colorMetric('errors',  data.error_rate_pct, 5, 1);
+    colorMetric('queue',   data.queue_depth, 30, 15);
+  }
+
+  function colorMetric(id, val, alertT, warnT) {
+    const cell = document.getElementById('cell-' + id);
+    const v    = document.getElementById('val-'  + id);
+    cell.className = v.className = 'metric-' + (val >= alertT ? 'alert' : val >= warnT ? 'warn' : 'ok');
+    cell.className = 'metric-cell ' + (val >= alertT ? 'alert' : val >= warnT ? 'warn' : 'ok');
+    v.className    = 'metric-value '+ (val >= alertT ? 'alert' : val >= warnT ? 'warn' : 'ok');
+  }
+
+  function updateRouting(backends, rationale) {
+    backends.forEach(b => {
+      if (b.name.includes('haiku')) {
+        document.getElementById('haikuPct').textContent = b.weight + '%';
+        document.getElementById('haikuBar').style.width = b.weight + '%';
+      } else {
+        document.getElementById('sonnetPct').textContent = b.weight + '%';
+        document.getElementById('sonnetBar').style.width = b.weight + '%';
+      }
+    });
+    const note = document.getElementById('routingNote');
+    note.textContent = rationale || 'Routing updated.';
+    note.className = 'routing-note patch';
+  }
+
+  function markCycleActive(cycle, scenario) {
+    const card = document.getElementById('cycle-' + cycle);
+    const dot  = document.getElementById('dot-' + cycle);
+    if (!card) return;
+    card.className = 'cycle-card active';
+    dot.className  = 'cycle-dot thinking';
+    const labels = { healthy: 'Healthy', cold_start: 'Cold Start', overload: 'Overload' };
+    card.querySelector('.cycle-scenario').textContent = labels[scenario] || scenario;
+    card.querySelector('.cycle-scenario').style.color =
+      scenario === 'healthy' ? 'var(--healthy)' :
+      scenario === 'cold_start' ? 'var(--cold)' : 'var(--overload)';
+  }
+
+  function markCycleDone(cycle, action, scenario) {
+    const card = document.getElementById('cycle-' + cycle);
+    const dot  = document.getElementById('dot-' + cycle);
+    if (!card) return;
+    const isNo = action && action.toUpperCase().includes('NO_ACTION');
+    const cls  = scenario === 'overload' ? 'done-overload' : scenario === 'cold_start' ? 'done-cold' : 'done-healthy';
+    card.className = 'cycle-card ' + cls;
+    dot.className  = 'cycle-dot ' + (scenario === 'overload' ? 'overload' : scenario === 'cold_start' ? 'cold' : 'healthy');
+    card.querySelector('.cycle-action').textContent = isNo ? 'NO ACTION' : 'PATCHED';
+  }
+
+  function addAuditEntry(ev) {
+    const container = document.getElementById('auditEntries');
+    // Remove empty state
+    const empty = container.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    const isNo       = ev.action && ev.action.toUpperCase().includes('NO_ACTION');
+    const isOverload = ev.action && ev.action.toUpperCase().includes('HAIKU') && ev.action.includes('75');
+    const hasMemory  = ev.rationale && (ev.rationale.includes('mirror') || ev.rationale.includes('prior') || ev.rationale.includes('pattern from'));
+
+    const cls = isNo ? 'no-action' : isOverload ? 'overload' : 'patch';
+
+    const entry = document.createElement('div');
+    entry.className = 'audit-entry ' + cls;
+    entry.innerHTML = `
+      <div class="audit-time">${new Date(ev.ts).toLocaleTimeString()}<br><span style="color:var(--muted);font-size:9px">CYCLE ${currentCycle}</span></div>
+      <div>
+        ${hasMemory ? '<div class="memory-tag">⟳ memory match</div>' : ''}
+        <div class="audit-action ${cls}">${ev.action || '—'}</div>
+      </div>
+      <div class="audit-rationale">${ev.rationale || ''}</div>
+    `;
+    container.appendChild(entry);
+    entry.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }
+</script>
+</body>
+</html>

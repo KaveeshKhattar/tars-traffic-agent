@@ -4,7 +4,28 @@
 
 import OpenAI from "openai";
 import { recallMemory } from "./memory.js";
-import { TOOLS, TOOL_HANDLERS, getAuditLog, waitForSimulator, SIMULATOR_URL } from "./tools.js";
+import { TOOLS, TOOL_HANDLERS, getAuditLog } from "./tools.js";
+
+// ── Dashboard emit (optional — silently skips if dashboard not running) ───────
+
+const DASHBOARD = "http://localhost:3000";
+
+async function emit(type, payload = {}) {
+  try {
+    await fetch(`${DASHBOARD}/event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, ...payload }),
+      signal: AbortSignal.timeout(500),
+    });
+  } catch { /* dashboard not running — fine */ }
+}
+
+async function resetDashboard() {
+  try {
+    await fetch(`${DASHBOARD}/reset`, { method: "POST", signal: AbortSignal.timeout(500) });
+  } catch { /* ok */ }
+}
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -19,9 +40,9 @@ const client = new OpenAI({
   apiKey:  TARS_API_KEY,
 });
 
-const TRIAGE_MODEL  = "claude-haiku-4-5";
+const TRIAGE_MODEL   = "claude-haiku-4-5";
 const FALLBACK_MODEL = "claude-sonnet-4-6";
-const MAX_TURNS     = 8;
+const MAX_TURNS      = 8;
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -33,7 +54,7 @@ You observe telemetry signals and make routing decisions for an AI gateway.
 ${recallMemory()}
 
 ## Your loop every cycle:
-1. Call get_metrics with the provided scenario (live traffic simulator — metrics are real samples, not static snapshots).
+1. Call get_metrics with the provided scenario.
 2. Diagnose by reading ALL three signals together — not just latency:
    - High latency + LOW errors + LOW queue = cold start → WARM the backend (send a small amount of traffic to it, do not shed)
    - High latency + HIGH errors + HIGH queue = overload → SHED load to claude-haiku-4-5
@@ -56,6 +77,7 @@ async function runCycle(scenario, cycleNumber) {
   console.log(`\n${"═".repeat(60)}`);
   console.log(`🔄 CYCLE ${cycleNumber} — scenario: ${scenario}`);
   console.log(`${"═".repeat(60)}`);
+  await emit("cycle_start", { cycle: cycleNumber, scenario });
 
   const messages = [
     { role: "system", content: buildSystemPrompt() },
@@ -65,22 +87,21 @@ async function runCycle(scenario, cycleNumber) {
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     console.log(`\n  ── turn ${turn + 1}`);
 
-    // Call model with fallback
     let msg;
     try {
       const resp = await client.chat.completions.create({
-        model:  TRIAGE_MODEL,
+        model:       TRIAGE_MODEL,
         messages,
-        tools:  TOOLS,
+        tools:       TOOLS,
         tool_choice: "auto",
       });
       msg = resp.choices[0].message;
     } catch (err) {
       console.warn(`  ⚠️  Primary model failed (${err.message}), falling back...`);
       const resp = await client.chat.completions.create({
-        model:  FALLBACK_MODEL,
+        model:       FALLBACK_MODEL,
         messages,
-        tools:  TOOLS,
+        tools:       TOOLS,
         tool_choice: "auto",
       });
       msg = resp.choices[0].message;
@@ -88,17 +109,17 @@ async function runCycle(scenario, cycleNumber) {
 
     messages.push(msg);
 
-    // Final answer — no more tool calls
+    // Final answer
     if (!msg.tool_calls || msg.tool_calls.length === 0) {
       console.log(`\n  ✅ ${msg.content}`);
       return msg.content;
     }
 
-    // Run each tool
+    // Run each tool and emit to dashboard
     for (const call of msg.tool_calls) {
       const name = call.function.name;
       let args = {};
-      try { args = JSON.parse(call.function.arguments); } catch { /* empty args */ }
+      try { args = JSON.parse(call.function.arguments); } catch { /* empty */ }
 
       console.log(`\n  🔧 ${name}(${JSON.stringify(args)})`);
 
@@ -106,17 +127,31 @@ async function runCycle(scenario, cycleNumber) {
       try {
         const handler = TOOL_HANDLERS[name];
         if (!handler) throw new Error(`Unknown tool: ${name}`);
-        result = await handler(args);
+        result = await Promise.resolve(handler(args));
       } catch (err) {
         result = { error: "tool_failed", message: err.message };
       }
 
       console.log(`     → ${JSON.stringify(result)}`);
 
+      // Push to dashboard based on tool
+      if (name === "get_metrics" && !result.error) {
+        await emit("metrics", { data: result });
+      }
+      if (name === "patch_routing" && result.success) {
+        await emit("patch", {
+          backends: result.diff.after,
+          rationale: `Routing updated: ${result.diff.before.map(b => `${b.name.includes('haiku') ? 'haiku' : 'sonnet'} ${b.weight}%`).join(', ')} → ${result.diff.after.map(b => `${b.name.includes('haiku') ? 'haiku' : 'sonnet'} ${b.weight}%`).join(', ')}`,
+        });
+      }
+      if (name === "audit_log") {
+        await emit("audit", { action: args.action, rationale: args.rationale });
+      }
+
       messages.push({
-        role:        "tool",
+        role:         "tool",
         tool_call_id: call.id,
-        content:     JSON.stringify(result),
+        content:      JSON.stringify(result),
       });
     }
   }
@@ -124,33 +159,21 @@ async function runCycle(scenario, cycleNumber) {
   return "Stopped: MAX_TURNS reached.";
 }
 
-// ── Demo: four cycles showing the happy path ──────────────────────────────────
+// ── Demo ──────────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log("🚀 TARS — Autonomous Inference Traffic Agent");
   console.log("   Tetrate AI Buildathon 2026\n");
 
-  console.log(`⏳ Waiting for traffic simulator at ${SIMULATOR_URL} ...`);
-  if (!(await waitForSimulator())) {
-    console.error("❌  Simulator not running. Start it in another terminal:");
-    console.error("    cd simulator && pip install -r requirements.txt && python simulator.py");
-    process.exit(1);
-  }
-  console.log("✅ Simulator ready\n");
+  await resetDashboard();
 
-  // Cycle 1: healthy — agent should do nothing
-  await runCycle("healthy", 1);
-
-  // Cycle 2: cold start — agent should WARM, not shed
+  await runCycle("healthy",    1);
   await runCycle("cold_start", 2);
-
-  // Cycle 3: cold start again — agent should recognise pattern from memory
   await runCycle("cold_start", 3);
+  await runCycle("overload",   4);
 
-  // Cycle 4: true overload — agent should shed load, explain why different from cycle 2
-  await runCycle("overload", 4);
+  await emit("done", {});
 
-  // Print full audit log at the end
   console.log(`\n${"═".repeat(60)}`);
   console.log("📋 FULL AUDIT LOG:");
   console.log(JSON.stringify(getAuditLog(), null, 2));
